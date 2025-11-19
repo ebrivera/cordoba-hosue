@@ -201,17 +201,53 @@ class ZoomDownloader:
                         found_recordings.append({
                             "topic": m.get("topic", "Unknown"),
                             "start_time": m.get("start_time", "Unknown"),
-                            "share_url": m.get("share_url", "")
+                            "share_url": m.get("share_url", ""),
+                            "uuid": m.get("uuid", "")
                         })
 
                 # Search through meetings
                 for meeting in meetings:
-                    # Check if share_url contains our recording ID
+                    # Strategy 1: Check if share_url contains our recording ID
                     meeting_share_url = meeting.get("share_url", "")
+                    match_found = False
 
                     if recording_id in meeting_share_url:
-                        print(f"\n✅ Found matching recording!")
+                        match_found = True
+                        print(f"\n✅ Found matching recording (by share URL)!")
 
+                    # Strategy 2: If we have a timestamp, match by recording start time
+                    elif start_time_ms:
+                        # Check all recording files in this meeting
+                        for file in meeting.get("recording_files", []):
+                            file_recording_start = file.get("recording_start", "")
+                            if file_recording_start:
+                                try:
+                                    # Parse the ISO timestamp from API (timezone-aware UTC)
+                                    from datetime import timezone
+                                    file_time = datetime.fromisoformat(file_recording_start.replace('Z', '+00:00'))
+                                    # Make target time also timezone-aware UTC
+                                    target_time = datetime.fromtimestamp(int(start_time_ms) / 1000, tz=timezone.utc)
+
+                                    # Allow 5 minute tolerance for timestamp matching
+                                    time_diff = abs((file_time - target_time).total_seconds())
+                                    if time_diff < 300:  # 5 minutes
+                                        match_found = True
+                                        print(f"\n✅ Found matching recording (by timestamp)!")
+                                        print(f"   Time difference: {time_diff:.0f} seconds")
+                                        break
+                                except Exception as e:
+                                    if debug:
+                                        print(f"\n   Debug: Error parsing timestamp: {e}")
+                                    pass
+
+                    # Strategy 3: Check if recording ID matches meeting UUID
+                    if not match_found:
+                        meeting_uuid = meeting.get("uuid", "")
+                        if meeting_uuid and recording_id in meeting_uuid:
+                            match_found = True
+                            print(f"\n✅ Found matching recording (by UUID)!")
+
+                    if match_found:
                         # Get the primary video file
                         for file in meeting.get("recording_files", []):
                             if file.get("file_type") in ["MP4", "M4A"]:
@@ -249,14 +285,18 @@ class ZoomDownloader:
             if debug and found_recordings:
                 print(f"\n   📋 Recordings found in this date range:")
                 for idx, rec in enumerate(found_recordings[:5], 1):  # Show first 5
-                    print(f"      {idx}. {rec['topic']} - {rec['start_time']}")
+                    print(f"      {idx}. {rec['topic']}")
+                    print(f"         Time: {rec['start_time']}")
+                    if rec['share_url']:
+                        print(f"         Share URL: {rec['share_url'][:80]}...")
+                    print(f"         UUID: {rec['uuid']}")
                 if len(found_recordings) > 5:
                     print(f"      ... and {len(found_recordings) - 5} more")
                 print(f"\n   💡 The recording you're looking for might:")
                 print(f"      - Be from a different Zoom account")
                 print(f"      - Have been deleted from cloud storage")
                 print(f"      - Be in trash/archived")
-                print(f"      - Have a different share URL format")
+                print(f"      - Require different access permissions")
             else:
                 print(f"   ⚠️  No recordings found in the date range {from_date} to {to_date}")
 
