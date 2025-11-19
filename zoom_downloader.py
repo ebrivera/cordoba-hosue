@@ -118,7 +118,7 @@ class ZoomDownloader:
             print(f"❌ Error parsing URL: {str(e)}")
             return None
 
-    def get_recording_metadata(self, share_url: str) -> Optional[Dict]:
+    def get_recording_metadata(self, share_url: str, debug: bool = True) -> Optional[Dict]:
         """
         Get recording metadata and download URL from a share URL.
 
@@ -126,6 +126,7 @@ class ZoomDownloader:
 
         Args:
             share_url: The Zoom share URL
+            debug: If True, print debug information about found recordings
 
         Returns:
             Dictionary with recording metadata including download_url, or None if not found
@@ -141,18 +142,44 @@ class ZoomDownloader:
             print("❌ Could not extract recording ID from share URL")
             return None
 
+        # Extract start time from URL to help narrow search
+        from datetime import datetime, timedelta
+        parsed_url = urlparse(share_url)
+        query_params = parse_qs(parsed_url.query)
+        start_time_ms = query_params.get('startTime', [None])[0]
+
+        # Determine date range for search
+        if start_time_ms:
+            start_timestamp = int(start_time_ms) / 1000
+            recording_date = datetime.fromtimestamp(start_timestamp)
+            # Search from 7 days before to 7 days after the recording
+            from_date = (recording_date - timedelta(days=7)).strftime('%Y-%m-%d')
+            to_date = (recording_date + timedelta(days=7)).strftime('%Y-%m-%d')
+            print(f"📅 Recording date: {recording_date.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   Searching from {from_date} to {to_date}")
+        else:
+            # Default to last 30 days if no date in URL
+            from_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+            to_date = datetime.now().strftime('%Y-%m-%d')
+
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json"
         }
 
-        # List all recordings and find the matching one
+        # List recordings with date range
         url = f"{self.base_url}/users/{self.user_id}/recordings"
-        params = {"page_size": 300}
+        params = {
+            "page_size": 300,
+            "from": from_date,
+            "to": to_date
+        }
 
         try:
             print(f"🔍 Searching for recording in user's cloud recordings...")
             page_count = 0
+            total_meetings = 0
+            found_recordings = []
 
             while True:
                 page_count += 1
@@ -165,9 +192,20 @@ class ZoomDownloader:
                     return None
 
                 data = response.json()
+                meetings = data.get("meetings", [])
+                total_meetings += len(meetings)
+
+                # Debug: collect info about found recordings
+                if debug and meetings:
+                    for m in meetings:
+                        found_recordings.append({
+                            "topic": m.get("topic", "Unknown"),
+                            "start_time": m.get("start_time", "Unknown"),
+                            "share_url": m.get("share_url", "")
+                        })
 
                 # Search through meetings
-                for meeting in data.get("meetings", []):
+                for meeting in meetings:
                     # Check if share_url contains our recording ID
                     meeting_share_url = meeting.get("share_url", "")
 
@@ -205,7 +243,23 @@ class ZoomDownloader:
                     break
 
             print(f"\n⚠️  Could not find recording with ID: {recording_id}")
-            print(f"   Searched {page_count} pages of recordings")
+            print(f"   Searched {page_count} pages, found {total_meetings} total recordings in date range")
+
+            # Show debug info if enabled
+            if debug and found_recordings:
+                print(f"\n   📋 Recordings found in this date range:")
+                for idx, rec in enumerate(found_recordings[:5], 1):  # Show first 5
+                    print(f"      {idx}. {rec['topic']} - {rec['start_time']}")
+                if len(found_recordings) > 5:
+                    print(f"      ... and {len(found_recordings) - 5} more")
+                print(f"\n   💡 The recording you're looking for might:")
+                print(f"      - Be from a different Zoom account")
+                print(f"      - Have been deleted from cloud storage")
+                print(f"      - Be in trash/archived")
+                print(f"      - Have a different share URL format")
+            else:
+                print(f"   ⚠️  No recordings found in the date range {from_date} to {to_date}")
+
             return None
 
         except Exception as e:
