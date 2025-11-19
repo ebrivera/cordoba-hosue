@@ -378,6 +378,201 @@ class ZoomDownloader:
             print(f"❌ Download error: {str(e)}")
             return False
 
+    def list_recordings(self, from_date: str = None, to_date: str = None,
+                       max_results: int = 300) -> List[Dict]:
+        """
+        List all recordings with their unique identifiers.
+
+        This is the RECOMMENDED way to get recording identifiers instead of share URLs.
+        Returns Meeting UUID, Recording ID, and other metadata you can use for downloads.
+
+        Args:
+            from_date: Start date in YYYY-MM-DD format (default: 30 days ago)
+            to_date: End date in YYYY-MM-DD format (default: today)
+            max_results: Maximum number of recordings to return
+
+        Returns:
+            List of recording dictionaries with:
+            - meeting_uuid: Unique meeting identifier (USE THIS for downloads)
+            - meeting_id: Numeric meeting ID
+            - topic: Meeting topic/name
+            - start_time: When the meeting started
+            - duration: Meeting duration in minutes
+            - recording_count: Number of recording files
+            - recording_files: List of file details (download_url, file_type, etc.)
+        """
+        # Ensure we have an access token
+        if not self.access_token:
+            self.get_access_token()
+
+        from datetime import datetime, timedelta
+
+        # Set default date range if not provided
+        if not from_date:
+            from_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        if not to_date:
+            to_date = datetime.now().strftime('%Y-%m-%d')
+
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+
+        url = f"{self.base_url}/users/{self.user_id}/recordings"
+        params = {
+            "page_size": 300,
+            "from": from_date,
+            "to": to_date
+        }
+
+        all_recordings = []
+        page_count = 0
+
+        print(f"📋 Listing recordings from {from_date} to {to_date}...")
+
+        try:
+            while len(all_recordings) < max_results:
+                page_count += 1
+                print(f"   Fetching page {page_count}...", end='\r')
+
+                response = requests.get(url, headers=headers, params=params)
+
+                if response.status_code != 200:
+                    print(f"\n❌ API error: {response.status_code} - {response.text}")
+                    break
+
+                data = response.json()
+                meetings = data.get("meetings", [])
+
+                for meeting in meetings:
+                    recording_info = {
+                        "meeting_uuid": meeting.get("uuid"),
+                        "meeting_id": meeting.get("id"),
+                        "topic": meeting.get("topic"),
+                        "start_time": meeting.get("start_time"),
+                        "duration": meeting.get("duration"),
+                        "recording_count": meeting.get("recording_count"),
+                        "share_url": meeting.get("share_url"),
+                        "recording_files": []
+                    }
+
+                    # Add details for each recording file
+                    for file in meeting.get("recording_files", []):
+                        recording_info["recording_files"].append({
+                            "recording_id": file.get("id"),
+                            "file_type": file.get("file_type"),
+                            "file_size": file.get("file_size"),
+                            "download_url": file.get("download_url"),
+                            "recording_start": file.get("recording_start"),
+                            "recording_end": file.get("recording_end")
+                        })
+
+                    all_recordings.append(recording_info)
+
+                    if len(all_recordings) >= max_results:
+                        break
+
+                # Check for next page
+                next_page_token = data.get("next_page_token")
+                if next_page_token:
+                    params["next_page_token"] = next_page_token
+                else:
+                    break
+
+            print(f"\n✅ Found {len(all_recordings)} recordings")
+            return all_recordings
+
+        except Exception as e:
+            print(f"\n❌ Error listing recordings: {str(e)}")
+            return all_recordings
+
+    def download_by_uuid(self, meeting_uuid: str,
+                        custom_filename: Optional[str] = None) -> Optional[Path]:
+        """
+        Download a recording using its Meeting UUID (RECOMMENDED METHOD).
+
+        This is more reliable than share URLs because UUIDs are the actual
+        unique identifiers used by Zoom's API.
+
+        Args:
+            meeting_uuid: The meeting UUID from list_recordings()
+            custom_filename: Optional custom filename (without extension)
+
+        Returns:
+            Path to downloaded file, or None if download failed
+        """
+        # Ensure we have an access token
+        if not self.access_token:
+            self.get_access_token()
+
+        print(f"\n{'='*70}")
+        print(f"DOWNLOADING BY UUID")
+        print(f"{'='*70}")
+        print(f"Meeting UUID: {meeting_uuid}")
+        print()
+
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+
+        # Get recording details for this specific meeting
+        url = f"{self.base_url}/meetings/{meeting_uuid}/recordings"
+
+        try:
+            response = requests.get(url, headers=headers)
+
+            if response.status_code != 200:
+                print(f"❌ Could not find recording: {response.status_code}")
+                return None
+
+            data = response.json()
+
+            # Find the video file
+            for file in data.get("recording_files", []):
+                if file.get("file_type") in ["MP4", "M4A"]:
+                    metadata = {
+                        "meeting_id": data.get("id"),
+                        "meeting_uuid": data.get("uuid"),
+                        "topic": data.get("topic"),
+                        "start_time": data.get("start_time"),
+                        "download_url": file.get("download_url"),
+                        "file_type": file.get("file_type"),
+                        "file_size": file.get("file_size")
+                    }
+
+                    print(f"✅ Found recording!")
+                    print(f"   Meeting: {metadata['topic']}")
+                    print(f"   Date: {metadata['start_time']}")
+                    print(f"   Type: {metadata['file_type']}")
+                    print(f"   Size: {metadata['file_size'] / (1024*1024):.1f} MB")
+
+                    # Determine output filename
+                    if custom_filename:
+                        filename = custom_filename
+                    else:
+                        safe_topic = "".join(c for c in metadata['topic'] if c.isalnum() or c in (' ', '-', '_')).strip()
+                        safe_topic = safe_topic.replace(' ', '_')
+                        filename = f"{metadata['meeting_id']}_{safe_topic}"
+
+                    # Add file extension
+                    file_extension = ".mp4" if metadata['file_type'] == "MP4" else ".m4a"
+                    output_path = self.output_dir / f"{filename}{file_extension}"
+
+                    # Download the file
+                    print()
+                    if self.download_file(metadata['download_url'], output_path):
+                        return output_path
+                    else:
+                        return None
+
+            print("❌ No video file found in this recording")
+            return None
+
+        except Exception as e:
+            print(f"❌ Error downloading by UUID: {str(e)}")
+            return None
+
     def download_from_share_url_direct(self, share_url: str,
                                       custom_filename: Optional[str] = None) -> Optional[Path]:
         """
