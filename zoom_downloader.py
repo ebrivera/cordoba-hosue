@@ -1,0 +1,417 @@
+"""
+Zoom Video Downloader
+
+A focused class for downloading Zoom cloud recordings.
+Supports downloading from share URLs or direct meeting IDs.
+
+Setup:
+    pip install requests python-dotenv --break-system-packages
+
+    Create a .env file with:
+    ZOOM_ACCOUNT_ID=your_account_id
+    ZOOM_CLIENT_ID=your_client_id
+    ZOOM_CLIENT_SECRET=your_client_secret
+    ZOOM_USER_ID=your_email@example.com
+"""
+
+import os
+import requests
+from pathlib import Path
+from typing import Dict, List, Optional
+from urllib.parse import urlparse, parse_qs
+import time
+
+
+class ZoomDownloader:
+    """Download Zoom cloud recordings from share URLs or meeting IDs"""
+
+    def __init__(self, account_id: str, client_id: str, client_secret: str,
+                 user_id: str, output_dir: str = "recordings"):
+        """
+        Initialize the Zoom downloader.
+
+        Args:
+            account_id: Zoom account ID
+            client_id: Zoom OAuth app client ID
+            client_secret: Zoom OAuth app client secret
+            user_id: Zoom user email/ID whose recordings to access
+            output_dir: Directory to save downloaded recordings
+        """
+        self.account_id = account_id
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.user_id = user_id
+        self.access_token = None
+        self.base_url = "https://api.zoom.us/v2"
+
+        # Create output directory
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
+
+        print(f"✅ ZoomDownloader initialized")
+        print(f"   Output directory: {self.output_dir.absolute()}")
+
+    def get_access_token(self) -> str:
+        """
+        Get OAuth access token from Zoom using Server-to-Server OAuth.
+        Token is valid for 1 hour.
+        """
+        url = f"https://zoom.us/oauth/token?grant_type=account_credentials&account_id={self.account_id}"
+
+        try:
+            response = requests.post(
+                url,
+                auth=(self.client_id, self.client_secret),
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+
+            if response.status_code == 200:
+                self.access_token = response.json()["access_token"]
+                print("✅ Obtained Zoom access token")
+                return self.access_token
+            else:
+                error_msg = f"Failed to get access token: {response.status_code} - {response.text}"
+                print(f"❌ {error_msg}")
+                raise Exception(error_msg)
+
+        except Exception as e:
+            print(f"❌ Authentication error: {str(e)}")
+            raise
+
+    def extract_recording_id_from_share_url(self, share_url: str) -> Optional[str]:
+        """
+        Extract recording identifier from Zoom share URL.
+
+        Examples:
+            https://us02web.zoom.us/rec/share/K87Fx1wSLflLf6-jeKItz...
+            -> K87Fx1wSLflLf6-jeKItz...
+
+        Args:
+            share_url: The Zoom share URL
+
+        Returns:
+            The recording ID or None if extraction failed
+        """
+        try:
+            parsed = urlparse(share_url)
+
+            # Check if it's a /rec/share/ URL
+            if '/rec/share/' in parsed.path:
+                # Extract the ID from the path
+                parts = parsed.path.split('/rec/share/')
+                if len(parts) > 1:
+                    recording_id = parts[1].split('/')[0].split('?')[0]
+                    print(f"📝 Extracted recording ID: {recording_id}")
+                    return recording_id
+
+            # Check for recording ID in query parameters
+            query_params = parse_qs(parsed.query)
+            if 'recording_id' in query_params:
+                recording_id = query_params['recording_id'][0]
+                print(f"📝 Extracted recording ID: {recording_id}")
+                return recording_id
+
+            print(f"⚠️  Could not extract recording ID from URL: {share_url}")
+            return None
+
+        except Exception as e:
+            print(f"❌ Error parsing URL: {str(e)}")
+            return None
+
+    def get_recording_metadata(self, share_url: str) -> Optional[Dict]:
+        """
+        Get recording metadata and download URL from a share URL.
+
+        This searches through the user's recordings to find the matching one.
+
+        Args:
+            share_url: The Zoom share URL
+
+        Returns:
+            Dictionary with recording metadata including download_url, or None if not found
+        """
+        # Ensure we have an access token
+        if not self.access_token:
+            self.get_access_token()
+
+        # Extract recording ID from share URL
+        recording_id = self.extract_recording_id_from_share_url(share_url)
+
+        if not recording_id:
+            print("❌ Could not extract recording ID from share URL")
+            return None
+
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json"
+        }
+
+        # List all recordings and find the matching one
+        url = f"{self.base_url}/users/{self.user_id}/recordings"
+        params = {"page_size": 300}
+
+        try:
+            print(f"🔍 Searching for recording in user's cloud recordings...")
+            page_count = 0
+
+            while True:
+                page_count += 1
+                print(f"   Checking page {page_count}...", end='\r')
+
+                response = requests.get(url, headers=headers, params=params)
+
+                if response.status_code != 200:
+                    print(f"\n❌ API error: {response.status_code} - {response.text}")
+                    return None
+
+                data = response.json()
+
+                # Search through meetings
+                for meeting in data.get("meetings", []):
+                    # Check if share_url contains our recording ID
+                    meeting_share_url = meeting.get("share_url", "")
+
+                    if recording_id in meeting_share_url:
+                        print(f"\n✅ Found matching recording!")
+
+                        # Get the primary video file
+                        for file in meeting.get("recording_files", []):
+                            if file.get("file_type") in ["MP4", "M4A"]:
+                                metadata = {
+                                    "meeting_id": meeting.get("id"),
+                                    "meeting_uuid": meeting.get("uuid"),
+                                    "topic": meeting.get("topic"),
+                                    "start_time": meeting.get("start_time"),
+                                    "download_url": file.get("download_url"),
+                                    "play_url": file.get("play_url"),
+                                    "file_type": file.get("file_type"),
+                                    "file_size": file.get("file_size"),
+                                    "recording_start": file.get("recording_start"),
+                                    "recording_end": file.get("recording_end")
+                                }
+
+                                print(f"   Meeting: {metadata['topic']}")
+                                print(f"   Date: {metadata['start_time']}")
+                                print(f"   Type: {metadata['file_type']}")
+                                print(f"   Size: {metadata['file_size'] / (1024*1024):.1f} MB")
+
+                                return metadata
+
+                # Check for next page
+                next_page_token = data.get("next_page_token")
+                if next_page_token:
+                    params["next_page_token"] = next_page_token
+                else:
+                    break
+
+            print(f"\n⚠️  Could not find recording with ID: {recording_id}")
+            print(f"   Searched {page_count} pages of recordings")
+            return None
+
+        except Exception as e:
+            print(f"\n❌ Error fetching recording metadata: {str(e)}")
+            return None
+
+    def download_file(self, download_url: str, output_path: Path,
+                     show_progress: bool = True) -> bool:
+        """
+        Download a file from Zoom with authentication.
+
+        Args:
+            download_url: The download URL from Zoom API
+            output_path: Where to save the file
+            show_progress: Whether to show download progress
+
+        Returns:
+            True if download succeeded, False otherwise
+        """
+        # Ensure we have an access token
+        if not self.access_token:
+            self.get_access_token()
+
+        # Add access token to URL
+        if "?" in download_url:
+            authenticated_url = f"{download_url}&access_token={self.access_token}"
+        else:
+            authenticated_url = f"{download_url}?access_token={self.access_token}"
+
+        try:
+            print(f"📥 Downloading to: {output_path.name}")
+            response = requests.get(authenticated_url, stream=True)
+
+            if response.status_code == 200:
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        if show_progress and total_size > 0:
+                            progress = (downloaded / total_size) * 100
+                            downloaded_mb = downloaded / (1024 * 1024)
+                            total_mb = total_size / (1024 * 1024)
+                            print(f"\r   Progress: {progress:.1f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)", end='')
+
+                if show_progress:
+                    print()  # New line after progress
+                print(f"✅ Successfully downloaded to: {output_path}")
+                return True
+            else:
+                print(f"❌ Download failed: {response.status_code} - {response.text}")
+                return False
+
+        except Exception as e:
+            print(f"❌ Download error: {str(e)}")
+            return False
+
+    def download_from_share_url(self, share_url: str,
+                               custom_filename: Optional[str] = None) -> Optional[Path]:
+        """
+        Download a recording from a Zoom share URL.
+
+        Args:
+            share_url: The Zoom share URL
+            custom_filename: Optional custom filename (without extension)
+
+        Returns:
+            Path to downloaded file, or None if download failed
+        """
+        print(f"\n{'='*70}")
+        print(f"DOWNLOADING ZOOM RECORDING")
+        print(f"{'='*70}")
+        print(f"Share URL: {share_url}")
+        print()
+
+        # Step 1: Get recording metadata
+        metadata = self.get_recording_metadata(share_url)
+
+        if not metadata:
+            print("❌ Could not retrieve recording metadata")
+            return None
+
+        # Step 2: Determine output filename
+        if custom_filename:
+            filename = custom_filename
+        else:
+            # Use meeting ID and topic for filename
+            safe_topic = "".join(c for c in metadata['topic'] if c.isalnum() or c in (' ', '-', '_')).strip()
+            safe_topic = safe_topic.replace(' ', '_')
+            filename = f"{metadata['meeting_id']}_{safe_topic}"
+
+        # Add file extension
+        file_extension = ".mp4" if metadata['file_type'] == "MP4" else ".m4a"
+        output_path = self.output_dir / f"{filename}{file_extension}"
+
+        # Step 3: Download the file
+        print()
+        if self.download_file(metadata['download_url'], output_path):
+            return output_path
+        else:
+            return None
+
+    def download_multiple(self, share_urls: List[str]) -> List[Dict]:
+        """
+        Download multiple recordings from a list of share URLs.
+
+        Args:
+            share_urls: List of Zoom share URLs
+
+        Returns:
+            List of dictionaries with download results for each URL
+        """
+        results = []
+
+        print(f"\n{'='*70}")
+        print(f"BATCH DOWNLOAD: {len(share_urls)} recordings")
+        print(f"{'='*70}\n")
+
+        for idx, share_url in enumerate(share_urls, 1):
+            print(f"\n[{idx}/{len(share_urls)}] Processing...")
+
+            try:
+                output_path = self.download_from_share_url(share_url)
+
+                if output_path:
+                    results.append({
+                        "share_url": share_url,
+                        "status": "success",
+                        "output_path": str(output_path),
+                        "error": None
+                    })
+                else:
+                    results.append({
+                        "share_url": share_url,
+                        "status": "failed",
+                        "output_path": None,
+                        "error": "Download failed"
+                    })
+
+            except Exception as e:
+                print(f"❌ Unexpected error: {str(e)}")
+                results.append({
+                    "share_url": share_url,
+                    "status": "error",
+                    "output_path": None,
+                    "error": str(e)
+                })
+
+            # Brief pause between downloads to avoid rate limiting
+            if idx < len(share_urls):
+                time.sleep(1)
+
+        # Print summary
+        print(f"\n{'='*70}")
+        print("DOWNLOAD SUMMARY")
+        print(f"{'='*70}")
+        successful = sum(1 for r in results if r["status"] == "success")
+        failed = len(results) - successful
+        print(f"✅ Successful: {successful}")
+        print(f"❌ Failed: {failed}")
+        print(f"{'='*70}\n")
+
+        return results
+
+
+# Helper function to load from environment variables
+def from_env(output_dir: str = "recordings") -> ZoomDownloader:
+    """
+    Create a ZoomDownloader instance from environment variables.
+
+    Required environment variables:
+        ZOOM_ACCOUNT_ID
+        ZOOM_CLIENT_ID
+        ZOOM_CLIENT_SECRET
+        ZOOM_USER_ID
+
+    Args:
+        output_dir: Directory to save downloaded recordings
+
+    Returns:
+        Configured ZoomDownloader instance
+    """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass  # dotenv not installed, rely on existing env vars
+
+    required_vars = [
+        "ZOOM_ACCOUNT_ID",
+        "ZOOM_CLIENT_ID",
+        "ZOOM_CLIENT_SECRET",
+        "ZOOM_USER_ID"
+    ]
+
+    missing = [var for var in required_vars if not os.getenv(var)]
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+    return ZoomDownloader(
+        account_id=os.getenv("ZOOM_ACCOUNT_ID"),
+        client_id=os.getenv("ZOOM_CLIENT_ID"),
+        client_secret=os.getenv("ZOOM_CLIENT_SECRET"),
+        user_id=os.getenv("ZOOM_USER_ID"),
+        output_dir=output_dir
+    )
