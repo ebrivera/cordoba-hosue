@@ -1,17 +1,50 @@
 # Zoom Downloader - Quick Start Guide
 
+## For Teams Manually Cataloging Videos
+
+**If someone on your team is manually writing down video information**, you have two options:
+
+### Option A: Stop Manual Work - Auto-Export Instead (RECOMMENDED)
+
+```bash
+# Automatically export ALL recordings with reliable UUIDs
+python list_recordings.py --from 2020-01-01 --to 2021-12-31 --output all_videos.csv
+```
+
+This gives you a complete CSV with UUIDs - much better than manual cataloging!
+
+### Option B: Already Have Manual CSV? Use It Directly
+
+If you already have a CSV with share links like this:
+```
+Name of the Meeting,Email,Meeting ID,Date,Time,Meeting Type,Teacher,Share Link
+Ibn Batuta 1 and 2,email@example.com,982 046 018,Mar 22 2020,10:29 AM,Classroom,Teacher Name,https://zoom.us/rec/share/...
+```
+
+Download all videos from your CSV:
+```bash
+python batch_download_from_csv.py your_manual_recordings.csv
+```
+
+Or get UUIDs for your manual CSV:
+```bash
+python match_csv_to_uuids.py your_manual_recordings.csv --from 2020-01-01 --to 2021-12-31
+```
+
 ## Why Use UUIDs Instead of Share Links?
 
-**Share Links are unreliable** because:
-- ❌ They can be from different Zoom accounts
-- ❌ Share tokens don't map cleanly to API identifiers
-- ❌ They may expire or change over time
+**Share Links work but are less reliable** because:
+- ⚠️ They might be from different Zoom accounts
+- ⚠️ Share tokens don't always map cleanly to API identifiers
+- ⚠️ Harder to track which account owns them
 
 **Meeting UUIDs are better** because:
 - ✅ They're the actual unique identifiers in Zoom's system
 - ✅ They work reliably with the API
 - ✅ They never change for a recording
 - ✅ You can only access recordings from YOUR account (secure)
+
+**Share links ARE unique per recording** ✓, so they work for manual cataloging!
 
 ## Quick Start
 
