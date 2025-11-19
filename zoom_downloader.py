@@ -4,6 +4,12 @@ Zoom Video Downloader
 A focused class for downloading Zoom cloud recordings.
 Supports downloading from share URLs or direct meeting IDs.
 
+Important Limitations:
+    - Share links and API access are different systems
+    - Share links might be from a DIFFERENT Zoom account than the one you're authenticated with
+    - The API searches YOUR account's recordings, not all public share links
+    - If a recording isn't found via API, the downloader attempts direct web scraping
+
 Setup:
     pip install requests python-dotenv --break-system-packages
 
@@ -11,7 +17,7 @@ Setup:
     ZOOM_ACCOUNT_ID=your_account_id
     ZOOM_CLIENT_ID=your_client_id
     ZOOM_CLIENT_SECRET=your_client_secret
-    ZOOM_USER_ID=your_email@example.com
+    ZOOM_USER_ID=your_email@example.com  # The account that owns the recordings
 """
 
 import os
@@ -307,31 +313,41 @@ class ZoomDownloader:
             return None
 
     def download_file(self, download_url: str, output_path: Path,
-                     show_progress: bool = True) -> bool:
+                     show_progress: bool = True, use_auth: bool = True,
+                     session: Optional[requests.Session] = None) -> bool:
         """
-        Download a file from Zoom with authentication.
+        Download a file from Zoom with optional authentication.
 
         Args:
-            download_url: The download URL from Zoom API
+            download_url: The download URL from Zoom API or share page
             output_path: Where to save the file
             show_progress: Whether to show download progress
+            use_auth: Whether to add API access token (True for API downloads)
+            session: Optional requests session to use (for share link downloads)
 
         Returns:
             True if download succeeded, False otherwise
         """
-        # Ensure we have an access token
-        if not self.access_token:
-            self.get_access_token()
+        # Build the URL
+        if use_auth:
+            # Ensure we have an access token
+            if not self.access_token:
+                self.get_access_token()
 
-        # Add access token to URL
-        if "?" in download_url:
-            authenticated_url = f"{download_url}&access_token={self.access_token}"
+            # Add access token to URL
+            if "?" in download_url:
+                url = f"{download_url}&access_token={self.access_token}"
+            else:
+                url = f"{download_url}?access_token={self.access_token}"
         else:
-            authenticated_url = f"{download_url}?access_token={self.access_token}"
+            url = download_url
+
+        # Use provided session or create new one
+        requester = session if session else requests
 
         try:
             print(f"📥 Downloading to: {output_path.name}")
-            response = requests.get(authenticated_url, stream=True)
+            response = requester.get(url, stream=True, allow_redirects=True)
 
             if response.status_code == 200:
                 total_size = int(response.headers.get('content-length', 0))
@@ -353,17 +369,92 @@ class ZoomDownloader:
                 print(f"✅ Successfully downloaded to: {output_path}")
                 return True
             else:
-                print(f"❌ Download failed: {response.status_code} - {response.text}")
+                print(f"❌ Download failed: {response.status_code}")
+                if response.status_code == 404:
+                    print(f"   💡 The download URL might have expired or been moved")
                 return False
 
         except Exception as e:
             print(f"❌ Download error: {str(e)}")
             return False
 
+    def download_from_share_url_direct(self, share_url: str,
+                                      custom_filename: Optional[str] = None) -> Optional[Path]:
+        """
+        Attempt to download directly from a share URL using web scraping.
+        This is a fallback when API search doesn't find the recording.
+
+        Args:
+            share_url: The Zoom share URL
+            custom_filename: Optional custom filename (without extension)
+
+        Returns:
+            Path to downloaded file, or None if download failed
+        """
+        print(f"\n🔄 Attempting direct download from share URL...")
+
+        try:
+            # Access the share page to get download URL
+            session = requests.Session()
+            response = session.get(share_url, allow_redirects=True)
+
+            if response.status_code != 200:
+                print(f"❌ Could not access share URL: {response.status_code}")
+                return None
+
+            # Try to find download link in the page
+            from urllib.parse import unquote
+            page_content = response.text
+
+            # Look for download URL patterns in the HTML
+            download_patterns = [
+                r'https://[^"\']+\.zoom\.us/rec/download/[^"\']+',
+                r'https://[^"\']+\.cloudfront\.net/[^"\']+\.mp4[^"\']*',
+                r'"downloadUrl":"([^"]+)"',
+                r'"playUrl":"([^"]+)"'
+            ]
+
+            import re
+            download_url = None
+            for pattern in download_patterns:
+                match = re.search(pattern, page_content)
+                if match:
+                    download_url = match.group(1) if '(' in pattern else match.group(0)
+                    download_url = unquote(download_url)
+                    break
+
+            if download_url:
+                print(f"✅ Found download URL via share page")
+                # Determine output filename
+                if custom_filename:
+                    filename = f"{custom_filename}.mp4"
+                else:
+                    recording_id = self.extract_recording_id_from_share_url(share_url)
+                    filename = f"{recording_id}.mp4"
+
+                output_path = self.output_dir / filename
+                # Use session and don't add API auth token
+                if self.download_file(download_url, output_path, use_auth=False, session=session):
+                    return output_path
+                else:
+                    return None
+            else:
+                print(f"❌ Could not find download URL in share page")
+                print(f"   💡 The recording might require password or be restricted")
+                return None
+
+        except Exception as e:
+            print(f"❌ Error during direct download: {str(e)}")
+            return None
+
     def download_from_share_url(self, share_url: str,
                                custom_filename: Optional[str] = None) -> Optional[Path]:
         """
         Download a recording from a Zoom share URL.
+
+        This method tries two approaches:
+        1. Search for the recording in the authenticated user's cloud recordings (API)
+        2. If not found, attempt direct download from the share URL (web scraping)
 
         Args:
             share_url: The Zoom share URL
@@ -378,32 +469,32 @@ class ZoomDownloader:
         print(f"Share URL: {share_url}")
         print()
 
-        # Step 1: Get recording metadata
+        # Step 1: Try to get recording metadata from API
         metadata = self.get_recording_metadata(share_url)
 
-        if not metadata:
-            print("❌ Could not retrieve recording metadata")
-            return None
+        if metadata:
+            # Step 2: Determine output filename
+            if custom_filename:
+                filename = custom_filename
+            else:
+                # Use meeting ID and topic for filename
+                safe_topic = "".join(c for c in metadata['topic'] if c.isalnum() or c in (' ', '-', '_')).strip()
+                safe_topic = safe_topic.replace(' ', '_')
+                filename = f"{metadata['meeting_id']}_{safe_topic}"
 
-        # Step 2: Determine output filename
-        if custom_filename:
-            filename = custom_filename
-        else:
-            # Use meeting ID and topic for filename
-            safe_topic = "".join(c for c in metadata['topic'] if c.isalnum() or c in (' ', '-', '_')).strip()
-            safe_topic = safe_topic.replace(' ', '_')
-            filename = f"{metadata['meeting_id']}_{safe_topic}"
+            # Add file extension
+            file_extension = ".mp4" if metadata['file_type'] == "MP4" else ".m4a"
+            output_path = self.output_dir / f"{filename}{file_extension}"
 
-        # Add file extension
-        file_extension = ".mp4" if metadata['file_type'] == "MP4" else ".m4a"
-        output_path = self.output_dir / f"{filename}{file_extension}"
+            # Step 3: Download the file
+            print()
+            if self.download_file(metadata['download_url'], output_path):
+                return output_path
 
-        # Step 3: Download the file
-        print()
-        if self.download_file(metadata['download_url'], output_path):
-            return output_path
-        else:
-            return None
+        # If API method failed, try direct download from share URL
+        print(f"\n⚠️  API search failed. Trying direct download method...")
+        print(f"   (The recording might be from a different Zoom account)")
+        return self.download_from_share_url_direct(share_url, custom_filename)
 
     def download_multiple(self, share_urls: List[str]) -> List[Dict]:
         """
