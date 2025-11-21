@@ -21,6 +21,7 @@ from pathlib import Path
 from zoom_downloader import from_env
 from transcriber import transcribe_video
 from segmenter import segment_video
+from structured_export import export_video_segmentation
 
 # Test video from your CSV
 TEST_SHARE_URL = "https://us02web.zoom.us/rec/share/AtdgqzZZVDaxgQrZ9zi8LxDBmkmR9zAywXyDr-BmAusL5MqYgycZw2A3gBwhFVwl.IMF_KocBJaohnImb?startTime=1584887394000"
@@ -114,6 +115,31 @@ def run_pipeline():
         return None
 
     # ========================================
+    # STEP 4: Export to Structured Format
+    # ========================================
+    print("\n" + "="*70)
+    print("STEP 4: EXPORT TO STRUCTURED FORMAT")
+    print("="*70)
+
+    structured_dir = Path("structured_output")
+    structured_dir.mkdir(exist_ok=True)
+
+    # Calculate duration in minutes
+    duration_minutes = transcript.get('duration', 0) / 60
+
+    # Export to CSV and JSON
+    export_video_segmentation(
+        segmentation=segmentation,
+        video_name=TEST_NAME,
+        date=TEST_DATE,
+        teacher="Unknown",  # Would come from CSV in batch mode
+        duration_minutes=duration_minutes,
+        output_dir=structured_dir
+    )
+
+    print(f"\n✅ Step 4 Complete: Structured data exported")
+
+    # ========================================
     # PIPELINE COMPLETE
     # ========================================
     print("\n" + "="*70)
@@ -125,6 +151,8 @@ def run_pipeline():
     print(f"  Transcript:   {transcripts_dir / f'{custom_filename}_transcript.txt'}")
     print(f"  Segmentation: {segments_dir / f'{custom_filename}_segments.json'}")
     print(f"  Segmentation: {segments_dir / f'{custom_filename}_segments.txt'}")
+    print(f"  Structured:   {structured_dir / f'{custom_filename}_structured.json'}")
+    print(f"  Master CSV:   {structured_dir / 'all_videos_structured.csv'}")
     print()
 
     return {

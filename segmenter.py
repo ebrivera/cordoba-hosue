@@ -40,7 +40,7 @@ class VideoSegmenter:
 
         Returns:
             Dictionary with:
-            - sections: List of identified sections with timestamps
+            - sections: List of identified sections with timestamps and FULL TEXT
             - summary: Overall summary
         """
         try:
@@ -89,6 +89,10 @@ class VideoSegmenter:
             print(f"⚠️  Warning: Could not parse JSON response. Using raw text.")
             result = {"raw_response": result_text, "sections": []}
 
+        # Extract the actual text for each section
+        print(f"📝 Extracting text for each section...")
+        result = self._extract_section_texts(result, transcript)
+
         return result
 
     def _format_for_analysis(self, transcript: Dict) -> str:
@@ -104,6 +108,60 @@ class VideoSegmenter:
         minutes = int(seconds // 60)
         secs = int(seconds % 60)
         return f"{minutes:02d}:{secs:02d}"
+
+    def _parse_timestamp(self, timestamp_str: str) -> float:
+        """Parse MM:SS timestamp to seconds"""
+        try:
+            parts = timestamp_str.split(':')
+            if len(parts) == 2:
+                minutes, seconds = parts
+                return int(minutes) * 60 + int(seconds)
+            elif len(parts) == 3:
+                hours, minutes, seconds = parts
+                return int(hours) * 3600 + int(minutes) * 60 + int(seconds)
+        except:
+            return 0.0
+        return 0.0
+
+    def _extract_section_texts(self, segmentation: Dict, transcript: Dict) -> Dict:
+        """
+        Extract the actual transcript text for each identified section.
+
+        Args:
+            segmentation: The segmentation result from Claude
+            transcript: The original transcript with timestamped segments
+
+        Returns:
+            Updated segmentation with 'text' field added to each section
+        """
+        if 'sections' not in segmentation or not segmentation['sections']:
+            return segmentation
+
+        # For each section, extract the text from transcript segments
+        for section in segmentation['sections']:
+            start_time = self._parse_timestamp(section.get('start_time', '00:00'))
+            end_time = self._parse_timestamp(section.get('end_time', '00:00'))
+
+            # Extract all transcript segments within this time range
+            section_texts = []
+            for seg in transcript.get('segments', []):
+                seg_start = seg.get('start', 0)
+                seg_end = seg.get('end', 0)
+
+                # Check if this segment overlaps with the section
+                if seg_start >= start_time and seg_end <= end_time:
+                    section_texts.append(seg.get('text', '').strip())
+                elif seg_start < end_time and seg_end > start_time:
+                    # Partial overlap - include it
+                    section_texts.append(seg.get('text', '').strip())
+
+            # Join all texts for this section
+            section['text'] = ' '.join(section_texts)
+            section['word_count'] = len(section['text'].split())
+
+            print(f"   {section['type']}: {section['word_count']} words")
+
+        return segmentation
 
     def _create_segmentation_prompt(self, transcript_text: str) -> str:
         """Create the prompt for Claude to segment the video"""
