@@ -60,7 +60,7 @@ class VideoSegmenter:
         client = Anthropic(api_key=self.api_key)
 
         response = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
+            model="claude-3-7-sonnet-20250219",  # Legacy model from docs
             max_tokens=2000,
             messages=[{
                 "role": "user",
