@@ -103,6 +103,60 @@ class VideoTranscriber:
                 "  Windows: Download from ffmpeg.org"
             )
 
+    def split_audio(self, audio_path: Path, max_size_mb: float = 24.0) -> List[Path]:
+        """
+        Split audio file into chunks under the size limit.
+
+        Args:
+            audio_path: Path to audio file
+            max_size_mb: Maximum size per chunk in MB
+
+        Returns:
+            List of paths to audio chunks
+        """
+        # Get duration of the audio file
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(audio_path)
+        ]
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        total_duration = float(result.stdout.decode('utf-8').strip())
+
+        # Calculate file size and number of chunks needed
+        file_size_mb = audio_path.stat().st_size / (1024 * 1024)
+        num_chunks = int(file_size_mb / max_size_mb) + 1
+
+        print(f"📂 Splitting audio into {num_chunks} chunks...")
+        print(f"   Total duration: {total_duration:.1f} seconds")
+
+        chunk_duration = total_duration / num_chunks
+        chunks = []
+
+        for i in range(num_chunks):
+            start_time = i * chunk_duration
+            chunk_path = audio_path.parent / f"{audio_path.stem}_chunk_{i+1}.mp3"
+
+            cmd = [
+                'ffmpeg',
+                '-i', str(audio_path),
+                '-ss', str(start_time),
+                '-t', str(chunk_duration),
+                '-acodec', 'copy',
+                '-y',
+                str(chunk_path)
+            ]
+
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            chunk_size = chunk_path.stat().st_size / (1024 * 1024)
+            print(f"   Chunk {i+1}/{num_chunks}: {chunk_size:.1f} MB")
+            chunks.append(chunk_path)
+
+        return chunks
+
     def transcribe_with_whisper_api(self, video_path: Path, use_audio_extraction: bool = True) -> Dict:
         """
         Transcribe video using OpenAI Whisper API.
@@ -142,40 +196,99 @@ class VideoTranscriber:
             audio_file = self.extract_audio(video_path)
             cleanup_audio = True
 
+        # Check if we need to split the audio
+        audio_size_mb = audio_file.stat().st_size / (1024 * 1024)
+        need_split = audio_size_mb > 24.0
+
+        chunks_to_cleanup = []
+
         client = OpenAI(api_key=self.api_key)
 
         try:
-            # Open the audio file
-            with open(audio_file, "rb") as f:
-                print(f"   Uploading file...")
+            if need_split:
+                print(f"   Audio still too large ({audio_size_mb:.1f} MB), splitting...")
 
-                # Use timestamp granularities for detailed timing
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=f,
-                    response_format="verbose_json",
-                    timestamp_granularities=["segment"]
-                )
+                # Split into chunks
+                chunks = self.split_audio(audio_file, max_size_mb=24.0)
+                chunks_to_cleanup = chunks
+
+                # Transcribe each chunk
+                all_segments = []
+                full_text = []
+                time_offset = 0.0
+
+                for i, chunk in enumerate(chunks, 1):
+                    print(f"   Transcribing chunk {i}/{len(chunks)}...")
+
+                    with open(chunk, "rb") as f:
+                        chunk_transcript = client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=f,
+                            response_format="verbose_json",
+                            timestamp_granularities=["segment"]
+                        )
+
+                    # Add segments with time offset
+                    if hasattr(chunk_transcript, 'segments'):
+                        for seg in chunk_transcript.segments:
+                            all_segments.append({
+                                "start": seg.get("start", 0) + time_offset,
+                                "end": seg.get("end", 0) + time_offset,
+                                "text": seg.get("text", "").strip()
+                            })
+
+                        # Update time offset for next chunk
+                        if chunk_transcript.segments:
+                            last_seg = chunk_transcript.segments[-1]
+                            time_offset += last_seg.get("end", 0)
+
+                    full_text.append(chunk_transcript.text)
+
+                # Combine results
+                segments = all_segments
+                combined_text = " ".join(full_text)
+                language = getattr(chunk_transcript, 'language', 'unknown')
+
+            else:
+                # Single file transcription
+                with open(audio_file, "rb") as f:
+                    print(f"   Uploading file...")
+
+                    transcript = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=f,
+                        response_format="verbose_json",
+                        timestamp_granularities=["segment"]
+                    )
+
+                # Extract segments with timestamps
+                segments = []
+                if hasattr(transcript, 'segments'):
+                    for seg in transcript.segments:
+                        segments.append({
+                            "start": seg.get("start", 0),
+                            "end": seg.get("end", 0),
+                            "text": seg.get("text", "").strip()
+                        })
+
+                combined_text = transcript.text
+                language = getattr(transcript, 'language', 'unknown')
+
         finally:
+            # Clean up chunks
+            for chunk in chunks_to_cleanup:
+                if chunk.exists():
+                    chunk.unlink()
+
             # Clean up extracted audio file
             if cleanup_audio and audio_file.exists():
                 print(f"   Cleaning up audio file...")
                 audio_file.unlink()
 
-        # Extract segments with timestamps
-        segments = []
-        if hasattr(transcript, 'segments'):
-            for seg in transcript.segments:
-                segments.append({
-                    "start": seg.get("start", 0),
-                    "end": seg.get("end", 0),
-                    "text": seg.get("text", "").strip()
-                })
-
         result = {
-            "text": transcript.text,
+            "text": combined_text,
             "segments": segments,
-            "language": getattr(transcript, 'language', 'unknown'),
+            "language": language,
             "duration": segments[-1]["end"] if segments else 0
         }
 
