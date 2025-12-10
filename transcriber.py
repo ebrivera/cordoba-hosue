@@ -232,15 +232,15 @@ class VideoTranscriber:
                     if hasattr(chunk_transcript, 'segments'):
                         for seg in chunk_transcript.segments:
                             all_segments.append({
-                                "start": seg.get("start", 0) + time_offset,
-                                "end": seg.get("end", 0) + time_offset,
-                                "text": seg.get("text", "").strip()
+                                "start": getattr(seg, 'start', 0) + time_offset,
+                                "end": getattr(seg, 'end', 0) + time_offset,
+                                "text": getattr(seg, 'text', "").strip()
                             })
 
                         # Update time offset for next chunk
                         if chunk_transcript.segments:
                             last_seg = chunk_transcript.segments[-1]
-                            time_offset += last_seg.get("end", 0)
+                            time_offset += getattr(last_seg, 'end', 0)
 
                     full_text.append(chunk_transcript.text)
 
@@ -266,9 +266,9 @@ class VideoTranscriber:
                 if hasattr(transcript, 'segments'):
                     for seg in transcript.segments:
                         segments.append({
-                            "start": seg.get("start", 0),
-                            "end": seg.get("end", 0),
-                            "text": seg.get("text", "").strip()
+                            "start": getattr(seg, 'start', 0),
+                            "end": getattr(seg, 'end', 0),
+                            "text": getattr(seg, 'text', "").strip()
                         })
 
                 combined_text = transcript.text
